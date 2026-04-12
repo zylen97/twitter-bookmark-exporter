@@ -1,0 +1,7 @@
+node_modules/
+raw/
+*.jsonl
+*.csv
+bookmarks.json
+bookmarks.md
+.DS_Store

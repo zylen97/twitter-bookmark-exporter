@@ -1,0 +1,33 @@
+{
+  "name": "twitter-bookmark-exporter",
+  "version": "1.0.0",
+  "description": "Export all your Twitter/X bookmarks via Chrome DevTools Protocol. Zero dependencies, no API keys.",
+  "type": "module",
+  "main": "export.mjs",
+  "bin": {
+    "twitter-bookmark-exporter": "./export.mjs"
+  },
+  "scripts": {
+    "start": "node export.mjs",
+    "export": "node export.mjs"
+  },
+  "keywords": [
+    "twitter",
+    "x",
+    "bookmarks",
+    "export",
+    "scraper",
+    "cdp",
+    "chrome-devtools-protocol",
+    "backup"
+  ],
+  "author": "Zylen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zylen97/twitter-bookmark-exporter.git"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
