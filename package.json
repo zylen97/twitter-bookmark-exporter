@@ -9,7 +9,9 @@
   },
   "scripts": {
     "start": "node export.mjs",
-    "export": "node export.mjs"
+    "export": "node export.mjs",
+    "kb:harvest": "node scripts/kb-harvest.mjs",
+    "kb:harvest:dry-run": "node scripts/kb-harvest.mjs --dry-run"
   },
   "keywords": [
     "twitter",

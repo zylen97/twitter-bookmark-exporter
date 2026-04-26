@@ -86,6 +86,81 @@ node export.mjs --raw
 node export.mjs -p 9333
 ```
 
+## KB Nightly Harvest
+
+This repository also includes a local KB harvester for Zylen's Obsidian Values
+vault. It collects recent Twitter/X bookmarks and a YouTube source, writes only
+new items to the KB raw inbox, stores seen-state for incremental runs, and emits
+an audit report.
+
+```bash
+# Audit only; opens Chrome pages but writes nothing
+npm run kb:harvest:dry-run
+
+# Write new raw items, run snapshots, state, and report to the Values vault
+npm run kb:harvest
+
+# Default YouTube source is the private KB Inbox playlist
+npm run kb:harvest -- --youtube-source playlist:PLYYARQTSCy9fhdnPH3q_80ATpMirif9GB
+
+# Use YouTube Watch Later through browser fallback
+npm run kb:harvest -- --youtube-source watch-later
+
+# Use liked videos through browser fallback
+npm run kb:harvest -- --youtube-source liked
+
+# Use a normal playlist id
+npm run kb:harvest -- --youtube-source playlist:PLxxxxxxxx
+```
+
+Default output paths:
+
+```text
+2-Values/raw/                       # timestamped new-item JSON batches
+2-Values/_automation/state/
+2-Values/_automation/runs/
+2-Values/_reports/harvest/
+```
+
+Raw new-item batches include a timestamp in the filename, so manual reruns on
+the same day do not overwrite earlier inbox files.
+
+The harvester does **not** remove videos from Watch Later. For Watch Later
+items it writes cleanup candidates into the report so the queue can be reviewed
+before any account-changing action.
+
+The recommended long-term YouTube intake path is the private `KB Inbox`
+playlist (`PLYYARQTSCy9fhdnPH3q_80ATpMirif9GB`). Save videos there when they
+should enter the KB source pipeline.
+
+For reliable CDP access, close any other tool currently attached to Chrome's
+remote debugging port before running the harvester. The script also forces
+`NO_PROXY=127.0.0.1,localhost,::1` internally so local Chrome debugging does
+not accidentally route through a system HTTP proxy.
+
+### macOS launchd schedule
+
+The durable daily schedule should be owned by macOS `launchd`, not by Codex
+cron, because this harvester needs Chrome/CDP and live access to X/YouTube.
+
+```bash
+mkdir -p logs
+cp config/launchd/com.zylen.kb-harvest.plist ~/Library/LaunchAgents/
+launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.zylen.kb-harvest.plist 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.zylen.kb-harvest.plist
+launchctl enable "gui/$(id -u)/com.zylen.kb-harvest"
+```
+
+The installed job runs every day at 21:00 and writes launchd stdout/stderr to:
+
+```text
+logs/launchd-kb-harvest-stdout.log
+logs/launchd-kb-harvest-stderr.log
+```
+
+Codex Automation should only read the generated harvest report afterward. It
+should not run the harvester directly.
+
 ### Options
 
 | Flag | Description | Default |

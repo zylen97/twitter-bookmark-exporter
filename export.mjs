@@ -22,7 +22,13 @@
 
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+
+process.env.NO_PROXY = ['127.0.0.1', 'localhost', '::1', process.env.NO_PROXY || process.env.no_proxy || '']
+  .filter(Boolean)
+  .join(',');
+process.env.no_proxy = process.env.NO_PROXY;
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -96,6 +102,95 @@ if (!WS) {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function activePortFiles() {
+  const home = os.homedir();
+  switch (os.platform()) {
+    case 'darwin':
+      return [
+        path.join(home, 'Library/Application Support/Google/Chrome/DevToolsActivePort'),
+        path.join(home, 'Library/Application Support/Google/Chrome Canary/DevToolsActivePort'),
+        path.join(home, 'Library/Application Support/Chromium/DevToolsActivePort'),
+      ];
+    case 'linux':
+      return [
+        path.join(home, '.config/google-chrome/DevToolsActivePort'),
+        path.join(home, '.config/chromium/DevToolsActivePort'),
+      ];
+    case 'win32':
+      return [
+        path.join(process.env.LOCALAPPDATA || '', 'Google/Chrome/User Data/DevToolsActivePort'),
+        path.join(process.env.LOCALAPPDATA || '', 'Chromium/User Data/DevToolsActivePort'),
+      ];
+    default:
+      return [];
+  }
+}
+
+function browserWebSocketFromJsonVersion(port) {
+  return new Promise((resolve) => {
+    const req = http.get({
+      host: '127.0.0.1',
+      port,
+      path: '/json/version',
+      timeout: 2000,
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(body);
+          resolve(parsed.webSocketDebuggerUrl || null);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+  });
+}
+
+async function browserWebSocketCandidates(port) {
+  const candidates = [];
+  const add = (value) => {
+    if (value && !candidates.includes(value)) candidates.push(value);
+  };
+
+  add(await browserWebSocketFromJsonVersion(port));
+
+  for (const file of activePortFiles()) {
+    try {
+      const [detectedPort, wsPath] = fs.readFileSync(file, 'utf8').trim().split(/\r?\n/);
+      if (Number(detectedPort) === port && wsPath) {
+        add(wsPath.startsWith('ws://') ? wsPath : `ws://127.0.0.1:${port}${wsPath}`);
+      }
+    } catch { /* try next discovery method */ }
+  }
+
+  add(`ws://127.0.0.1:${port}/devtools/browser`);
+  return candidates;
+}
+
+async function connectBrowser(port) {
+  const errors = [];
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const candidates = await browserWebSocketCandidates(port);
+    for (const wsUrl of candidates) {
+      const browser = new CDPClient(wsUrl);
+      try {
+        await browser.connect();
+        return browser;
+      } catch (error) {
+        errors.push(`attempt ${attempt} ${wsUrl}: ${error.message}`);
+        browser.close();
+      }
+    }
+    await sleep(1000 * attempt);
+  }
+  throw new Error(`Chrome CDP connection failed. Tried ${errors.join('; ')}`);
+}
 
 class CDPClient {
   constructor(wsUrl) {
@@ -297,15 +392,16 @@ function writeOutput(tweets, filepath, format) {
 async function main() {
   // 1. Connect to Chrome
   console.log(`Connecting to Chrome CDP on port ${CDP_PORT}...`);
-  const browser = new CDPClient(`ws://127.0.0.1:${CDP_PORT}/devtools/browser`);
+  let browser;
   try {
-    await browser.connect();
-  } catch {
+    browser = await connectBrowser(CDP_PORT);
+  } catch (error) {
     console.error(
       '\nFailed to connect to Chrome DevTools.\n\n' +
       'Make sure Chrome is running with remote debugging enabled:\n' +
       '  Option A: chrome://flags → search "remote debugging" → Enable → Restart\n' +
-      '  Option B: Launch Chrome with --remote-debugging-port=9222\n'
+      '  Option B: Launch Chrome with --remote-debugging-port=9222\n\n' +
+      `${error.message}\n`
     );
     process.exit(1);
   }

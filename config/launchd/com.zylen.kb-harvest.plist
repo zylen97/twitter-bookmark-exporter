@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zylen.kb-harvest</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>/Users/zylen/Library/CloudStorage/Dropbox/04-Coding/twitter-bookmark-exporter/scripts/kb-harvest-launchd.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/zylen/Library/CloudStorage/Dropbox/04-Coding/twitter-bookmark-exporter</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>21</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/zylen/Library/CloudStorage/Dropbox/04-Coding/twitter-bookmark-exporter/logs/launchd-kb-harvest-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/zylen/Library/CloudStorage/Dropbox/04-Coding/twitter-bookmark-exporter/logs/launchd-kb-harvest-stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/zylen</string>
+        <key>PATH</key>
+        <string>/Users/zylen/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>NO_PROXY</key>
+        <string>127.0.0.1,localhost,::1</string>
+        <key>no_proxy</key>
+        <string>127.0.0.1,localhost,::1</string>
+    </dict>
+</dict>
+</plist>
