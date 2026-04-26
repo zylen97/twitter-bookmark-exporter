@@ -111,6 +111,9 @@ npm run kb:harvest -- --youtube-source liked
 
 # Use a normal playlist id
 npm run kb:harvest -- --youtube-source playlist:PLxxxxxxxx
+
+# After a successful write, remove captured videos from a normal playlist source
+npm run kb:harvest -- --cleanup-youtube-after-write
 ```
 
 Default output paths:
@@ -125,9 +128,11 @@ Default output paths:
 Raw new-item batches include a timestamp in the filename, so manual reruns on
 the same day do not overwrite earlier inbox files.
 
-The harvester does **not** remove videos from Watch Later. For Watch Later
-items it writes cleanup candidates into the report so the queue can be reviewed
-before any account-changing action.
+With `--cleanup-youtube-after-write`, the harvester removes captured videos from
+normal YouTube playlist sources after the run snapshot, raw batch, and seen-state
+have been written successfully. Cleanup writes a per-run JSON audit file and a
+summary in the harvest report. It does **not** remove videos from Watch Later or
+Liked Videos.
 
 The recommended long-term YouTube intake path is the private `KB Inbox`
 playlist (`PLYYARQTSCy9fhdnPH3q_80ATpMirif9GB`). Save videos there when they
@@ -160,6 +165,37 @@ logs/launchd-kb-harvest-stderr.log
 
 Codex Automation should only read the generated harvest report afterward. It
 should not run the harvester directly.
+
+The launchd wrapper enables `--cleanup-youtube-after-write`, so videos saved to
+the private `KB Inbox` playlist are removed from that playlist after they have
+been captured. Twitter/X bookmarks are never removed by this repository.
+
+Chrome 136+ requires a non-default profile for remote debugging. The launchd
+wrapper therefore starts a dedicated profile at:
+
+```text
+~/Library/Application Support/Google/Chrome KB Automation
+```
+
+Sign in to X and YouTube once in that profile before relying on the nightly job.
+Its Chrome startup log is written to:
+
+```text
+logs/chrome-kb-automation.log
+```
+
+To open the automation profile for first-time sign-in:
+
+```bash
+open -na "Google Chrome" --args \
+  --user-data-dir="$HOME/Library/Application Support/Google/Chrome KB Automation" \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port=9222 \
+  --no-first-run \
+  --no-default-browser-check \
+  "https://www.youtube.com/playlist?list=PLYYARQTSCy9fhdnPH3q_80ATpMirif9GB" \
+  "https://x.com/i/bookmarks"
+```
 
 ### Options
 

@@ -17,6 +17,7 @@ const DEFAULT_STATE_DIR = path.join(VALUES_ROOT, '_automation', 'state');
 const DEFAULT_RUN_DIR = path.join(VALUES_ROOT, '_automation', 'runs');
 const DEFAULT_YOUTUBE_SOURCE = 'playlist:PLYYARQTSCy9fhdnPH3q_80ATpMirif9GB';
 const LOCAL_TIME_ZONE = 'Asia/Shanghai';
+const DEFAULT_CHROME_PORT = 9222;
 
 function parseArgs(argv) {
   const out = {
@@ -28,6 +29,8 @@ function parseArgs(argv) {
     xMaxResponses: 5,
     youtubeMaxScrolls: 8,
     youtubeLimit: 100,
+    cleanupYouTubeAfterWrite: false,
+    chromePort: DEFAULT_CHROME_PORT,
     rawInbox: DEFAULT_RAW_INBOX,
     reportDir: DEFAULT_REPORT_DIR,
     stateDir: DEFAULT_STATE_DIR,
@@ -45,6 +48,9 @@ function parseArgs(argv) {
     else if (arg === '--x-max-responses') out.xMaxResponses = Number(next());
     else if (arg === '--youtube-max-scrolls') out.youtubeMaxScrolls = Number(next());
     else if (arg === '--youtube-limit') out.youtubeLimit = Number(next());
+    else if (arg === '--cleanup-youtube-after-write') out.cleanupYouTubeAfterWrite = true;
+    else if (arg === '--no-cleanup-youtube-after-write') out.cleanupYouTubeAfterWrite = false;
+    else if (arg === '--chrome-port') out.chromePort = Number(next());
     else if (arg === '--raw-inbox') out.rawInbox = next();
     else if (arg === '--report-dir') out.reportDir = next();
     else if (arg === '--state-dir') out.stateDir = next();
@@ -77,6 +83,11 @@ Options:
   --x-max-responses <n>      Twitter/X GraphQL pages to capture (default: 5)
   --youtube-max-scrolls <n>  YouTube scroll attempts (default: 8)
   --youtube-limit <n>        Max YouTube videos to keep (default: 100)
+  --cleanup-youtube-after-write
+                             Remove captured videos from playlist sources
+  --no-cleanup-youtube-after-write
+                             Disable YouTube playlist cleanup
+  --chrome-port <port>       Chrome CDP port (default: ${DEFAULT_CHROME_PORT})
   --raw-inbox <path>         Raw inbox path
   --report-dir <path>        Harvest report path
   --state-dir <path>         Seen-state path
@@ -524,6 +535,23 @@ function youtubeSourceToUrl(source) {
   throw new Error(`Unsupported YouTube source: ${source}`);
 }
 
+function youtubePlaylistId(source) {
+  if (source?.startsWith('playlist:')) return source.slice('playlist:'.length);
+  if (/^https?:\/\//.test(source || '')) {
+    try {
+      return new URL(source).searchParams.get('list') || '';
+    } catch {
+      return '';
+    }
+  }
+  return '';
+}
+
+function youtubeCleanupAllowed(source) {
+  const playlistId = youtubePlaylistId(source);
+  return Boolean(playlistId && playlistId !== 'WL' && playlistId !== 'LL');
+}
+
 function sanitizeLabel(label) {
   return label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'source';
 }
@@ -559,8 +587,8 @@ async function collectYouTube(browser, options) {
     title: document.title,
     url: location.href,
     ready: document.readyState,
-    loginHint: /Sign in|登录|ログイン/.test(document.body.innerText),
-    emptyHint: /No videos|没有视频|動画はありません|This playlist does not exist/.test(document.body.innerText),
+    loginHint: /Sign in|登录|登入|ログイン/.test(document.body.innerText) || Boolean(document.querySelector('a[href*="ServiceLogin"], a[href*="/signin"]')),
+    emptyHint: /No videos|没有视频|動画はありません|This playlist does not exist|该播放列表不存在|此播放列表不存在/.test(document.body.innerText),
     videos: [...document.querySelectorAll('ytd-playlist-video-renderer, ytd-video-renderer')].map((renderer, idx) => {
       const link = renderer.querySelector('a#video-title') || renderer.querySelector('a[href*="watch?v="]:not(#thumbnail)');
       const rawHref = link?.href || '';
@@ -643,6 +671,201 @@ async function collectYouTube(browser, options) {
   }
 }
 
+async function collectVisibleYouTubeVideoIds(page, options) {
+  const expression = `JSON.stringify([...document.querySelectorAll('ytd-playlist-video-renderer, ytd-video-renderer')]
+    .map(renderer => {
+      const link = renderer.querySelector('a#video-title') || renderer.querySelector('a[href*="watch?v="]:not(#thumbnail)');
+      return new URL(link?.href || '', location.href).searchParams.get('v') || '';
+    })
+    .filter(Boolean))`;
+  const ids = new Set();
+  let lastCount = 0;
+  let noNewCount = 0;
+
+  for (let i = 0; i <= options.youtubeMaxScrolls && noNewCount < 4; i++) {
+    const current = await page('Runtime.evaluate', { expression, returnByValue: true });
+    const visible = JSON.parse(current.result?.result?.value || '[]');
+    for (const id of visible) ids.add(id);
+    if (ids.size > lastCount) {
+      lastCount = ids.size;
+      noNewCount = 0;
+    } else {
+      noNewCount++;
+    }
+    await page('Runtime.evaluate', { expression: 'window.scrollBy(0, 1800)', returnByValue: true });
+    await sleep(1000);
+  }
+
+  return [...ids];
+}
+
+async function cleanupYouTubePlaylist(browser, options, items) {
+  const source = youtubeSourceToUrl(options.youtubeSource);
+  const playlistId = youtubePlaylistId(options.youtubeSource);
+  const uniqueItems = [];
+  const seen = new Set();
+  for (const item of items) {
+    if (!item.video_id || seen.has(item.video_id)) continue;
+    seen.add(item.video_id);
+    uniqueItems.push({
+      video_id: item.video_id,
+      title: item.title || '',
+      url: item.url || '',
+    });
+  }
+
+  const base = {
+    source: source.label,
+    playlist_id: playlistId || null,
+    requested_at: new Date().toISOString(),
+    enabled: options.cleanupYouTubeAfterWrite,
+    attempted: uniqueItems.length,
+    removed: 0,
+    failed: 0,
+    skipped: 0,
+    results: [],
+  };
+
+  if (!options.cleanupYouTubeAfterWrite) {
+    return { ...base, ok: true, status: 'disabled' };
+  }
+  if (!uniqueItems.length) {
+    return { ...base, ok: true, status: 'nothing_to_cleanup' };
+  }
+  if (!youtubeCleanupAllowed(options.youtubeSource)) {
+    return {
+      ...base,
+      ok: true,
+      status: 'skipped',
+      skipped: uniqueItems.length,
+      reason: 'cleanup_only_supports_normal_playlist_sources',
+      results: uniqueItems.map(item => ({ ...item, status: 'skipped_unsupported_source' })),
+    };
+  }
+
+  let targetId;
+  const created = await browser.send('Target.createTarget', { url: source.url, background: true });
+  targetId = created.result.targetId;
+  const attached = await browser.send('Target.attachToTarget', { targetId, flatten: true });
+  const sessionId = attached.result.sessionId;
+  const page = (method, params = {}, timeoutMs) => browser.send(method, params, sessionId, timeoutMs);
+
+  try {
+    await page('Page.enable');
+    await sleep(7000);
+
+    const cleanupExpression = `(async () => {
+      const playlistId = ${JSON.stringify(playlistId)};
+      const targets = ${JSON.stringify(uniqueItems)};
+      const cfg = globalThis.ytcfg;
+      if (!cfg?.get) {
+        return JSON.stringify({
+          ok: false,
+          status: 'failed',
+          error: 'ytcfg_missing',
+          results: targets.map(item => ({ ...item, status: 'failed', error: 'ytcfg_missing' }))
+        });
+      }
+
+      const apiKey = cfg.get('INNERTUBE_API_KEY');
+      const context = cfg.get('INNERTUBE_CONTEXT');
+      if (!apiKey || !context) {
+        return JSON.stringify({
+          ok: false,
+          status: 'failed',
+          error: 'innertube_config_missing',
+          results: targets.map(item => ({ ...item, status: 'failed', error: 'innertube_config_missing' }))
+        });
+      }
+
+      const headers = { 'content-type': 'application/json' };
+      const clientName = cfg.get('INNERTUBE_CLIENT_NAME');
+      const clientVersion = cfg.get('INNERTUBE_CLIENT_VERSION');
+      const visitorData = cfg.get('VISITOR_DATA');
+      const identityToken = cfg.get('ID_TOKEN');
+      if (clientName) headers['x-youtube-client-name'] = String(clientName);
+      if (clientVersion) headers['x-youtube-client-version'] = String(clientVersion);
+      if (visitorData) headers['x-goog-visitor-id'] = String(visitorData);
+      if (identityToken) headers['x-youtube-identity-token'] = String(identityToken);
+
+      const results = [];
+      for (const item of targets) {
+        try {
+          const body = {
+            context,
+            playlistId,
+            actions: [{
+              action: 'ACTION_REMOVE_VIDEO_BY_VIDEO_ID',
+              removedVideoId: item.video_id
+            }]
+          };
+          const response = await fetch('/youtubei/v1/browse/edit_playlist?prettyPrint=false&key=' + encodeURIComponent(apiKey), {
+            method: 'POST',
+            credentials: 'include',
+            headers,
+            body: JSON.stringify(body)
+          });
+          results.push({
+            ...item,
+            status: response.ok ? 'remove_sent' : 'failed',
+            http_status: response.status
+          });
+        } catch (error) {
+          results.push({
+            ...item,
+            status: 'failed',
+            error: String(error?.message || error)
+          });
+        }
+        await new Promise(resolve => setTimeout(resolve, 350));
+      }
+
+      return JSON.stringify({
+        ok: results.every(item => item.status === 'remove_sent'),
+        status: 'completed',
+        results
+      });
+    })()`;
+
+    const evaluated = await page(
+      'Runtime.evaluate',
+      { expression: cleanupExpression, awaitPromise: true, returnByValue: true },
+      120000
+    );
+    const payload = JSON.parse(evaluated.result?.result?.value || '{}');
+    if (evaluated.result?.exceptionDetails) {
+      throw new Error(evaluated.result.exceptionDetails.text || 'YouTube cleanup evaluation failed');
+    }
+    if (!Array.isArray(payload.results)) {
+      throw new Error(payload.error || 'YouTube cleanup returned no per-video results');
+    }
+
+    await page('Page.navigate', { url: source.url });
+    await sleep(6000);
+    const visibleAfter = new Set(await collectVisibleYouTubeVideoIds(page, options));
+    const results = (payload.results || []).map(result => {
+      const visibleAfterCleanup = visibleAfter.has(result.video_id);
+      if (result.status === 'remove_sent' && visibleAfterCleanup) {
+        return { ...result, status: 'remove_sent_but_still_visible', visible_after_cleanup: true };
+      }
+      return { ...result, visible_after_cleanup: visibleAfterCleanup };
+    });
+    const removed = results.filter(result => result.status === 'remove_sent' && !result.visible_after_cleanup).length;
+    const failed = results.filter(result => result.status !== 'remove_sent' || result.visible_after_cleanup).length;
+
+    return {
+      ...base,
+      ok: failed === 0,
+      status: failed === 0 ? 'completed' : 'completed_with_failures',
+      removed,
+      failed,
+      results,
+    };
+  } finally {
+    await browser.send('Target.closeTarget', { targetId }).catch(() => {});
+  }
+}
+
 function applyIncremental(sourceResult, stateFile, keyFn) {
   const seen = loadSeen(stateFile);
   const newItems = [];
@@ -684,6 +907,13 @@ function writeRunSnapshot(runDir, dateTime, label, result) {
   return file;
 }
 
+function writeCleanupSnapshot(runDir, dateTime, label, cleanup) {
+  ensureDir(runDir);
+  const file = uniquePath(path.join(runDir, `${dateTime}_${sanitizeLabel(label)}-cleanup.json`));
+  fs.writeFileSync(file, `${JSON.stringify(cleanup, null, 2)}\n`, 'utf8');
+  return file;
+}
+
 function renderReport({ date, dryRun, outputs, twitter, youtube }) {
   const lines = [];
   lines.push(`# KB Source Harvest Report - ${date}`);
@@ -708,6 +938,28 @@ function renderReport({ date, dryRun, outputs, twitter, youtube }) {
     lines.push(JSON.stringify(result.audit, null, 2));
     lines.push('```');
     lines.push('');
+
+    if (entry.cleanup) {
+      lines.push('### Cleanup');
+      lines.push('');
+      lines.push(`- Enabled: ${entry.cleanup.enabled ? 'yes' : 'no'}`);
+      lines.push(`- Status: ${entry.cleanup.status}`);
+      lines.push(`- Attempted: ${entry.cleanup.attempted}`);
+      lines.push(`- Removed: ${entry.cleanup.removed}`);
+      lines.push(`- Failed: ${entry.cleanup.failed}`);
+      lines.push(`- Skipped: ${entry.cleanup.skipped}`);
+      if (entry.cleanup.reason) lines.push(`- Reason: ${entry.cleanup.reason}`);
+      lines.push('');
+      const failed = (entry.cleanup.results || []).filter(item => item.status !== 'remove_sent' || item.visible_after_cleanup);
+      if (failed.length) {
+        lines.push('#### Cleanup Failures');
+        lines.push('');
+        for (const item of failed.slice(0, 30)) {
+          lines.push(`- ${item.video_id}: ${item.status}${item.http_status ? ` (HTTP ${item.http_status})` : ''}${item.error ? ` - ${item.error}` : ''}`);
+        }
+        lines.push('');
+      }
+    }
 
     if (result.source === 'youtube_watch_later' && newItems.length) {
       lines.push('### Watch Later Cleanup Candidates');
@@ -736,7 +988,7 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
   const date = stampDate();
   const dateTime = stampDateTime();
-  const browser = await connectBrowser(9222);
+  const browser = await connectBrowser(options.chromePort);
 
   const outputs = [];
   let twitter = null;
@@ -770,6 +1022,36 @@ async function main() {
         for (const item of result.items) delta.seen.add(item.video_id);
         writeSeen(stateFile, delta.seen, { source: result.source });
         outputs.push(stateFile);
+        if (options.cleanupYouTubeAfterWrite) {
+          try {
+            youtube.cleanup = await cleanupYouTubePlaylist(
+              browser,
+              options,
+              [...delta.newItems, ...delta.duplicateItems]
+            );
+          } catch (error) {
+            youtube.cleanup = {
+              source: result.source,
+              requested_at: new Date().toISOString(),
+              enabled: true,
+              ok: false,
+              status: 'failed',
+              attempted: delta.newItems.length + delta.duplicateItems.length,
+              removed: 0,
+              failed: delta.newItems.length + delta.duplicateItems.length,
+              skipped: 0,
+              error: error.message,
+              results: [...delta.newItems, ...delta.duplicateItems].map(item => ({
+                video_id: item.video_id,
+                title: item.title || '',
+                url: item.url || '',
+                status: 'failed',
+                error: error.message,
+              })),
+            };
+          }
+          outputs.push(writeCleanupSnapshot(options.runDir, dateTime, result.source, youtube.cleanup));
+        }
       }
     }
 
