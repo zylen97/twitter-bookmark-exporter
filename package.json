@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node export.mjs",
     "export": "node export.mjs",
+    "test": "node --test tests/*.test.mjs",
     "kb:harvest": "node scripts/kb-harvest.mjs",
     "kb:harvest:dry-run": "node scripts/kb-harvest.mjs --dry-run"
   },
